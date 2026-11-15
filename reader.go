@@ -34,8 +34,9 @@ func (r *Reader) Close() error {
 }
 
 // LimitReader returns a reader that yields at most limit bytes of reader and then fails with
-// ErrTooLarge if reader holds more. Unlike io.LimitReader it never truncates silently. A limit
-// of zero or less yields nothing and fails on the first byte.
+// ErrTooLarge if reader holds more. Unlike io.LimitReader it never truncates silently: once it
+// failed, every later Read fails with the same error. A limit of zero or less yields nothing
+// and fails on the first byte.
 func LimitReader(reader io.Reader, limit int64) io.Reader {
 	return &limitedReader{reader: reader, remaining: limit}
 }
@@ -43,9 +44,13 @@ func LimitReader(reader io.Reader, limit int64) io.Reader {
 type limitedReader struct {
 	reader    io.Reader
 	remaining int64
+	err       error // ErrTooLarge once the probe found a byte past the limit
 }
 
 func (r *limitedReader) Read(buffer []byte) (int, error) {
+	if r.err != nil {
+		return 0, r.err
+	}
 	if r.remaining <= 0 {
 		return r.probe()
 	}
@@ -64,7 +69,8 @@ func (r *limitedReader) probe() (int, error) {
 	for {
 		count, err := r.reader.Read(single[:])
 		if count > 0 {
-			return 0, ErrTooLarge
+			r.err = ErrTooLarge
+			return 0, r.err
 		}
 		if err != nil {
 			return 0, err

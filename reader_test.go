@@ -62,3 +62,16 @@ func TestContextReader(t *testing.T) {
 	_, err = reader.Read(buffer)
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+func TestLimitReaderErrorIsSticky(t *testing.T) {
+	reader := storage.LimitReader(strings.NewReader("12345678901"), 10)
+	buffer := make([]byte, 10)
+	count, err := reader.Read(buffer)
+	require.NoError(t, err)
+	require.Equal(t, 10, count)
+	for range 3 {
+		count, err = reader.Read(buffer)
+		require.ErrorIs(t, err, storage.ErrTooLarge, "a read after the error never ends cleanly")
+		require.Zero(t, count)
+	}
+}

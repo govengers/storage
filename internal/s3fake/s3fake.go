@@ -1,6 +1,7 @@
 // Package s3fake is an in-process S3 server for the tests of s3adapter: the path-style REST
 // calls s3adapter makes (put, get with range, head, delete, list v2, copy, multipart upload)
-// on buckets held in memory. It does not check signatures or expiry, and refuses
+// on buckets held in memory, with x-amz-copy-source decoded like S3 does ('+' is a space) and
+// x-amz-copy-source-if-match. It does not check signatures or expiry, and refuses
 // aws-chunked bodies, which s3adapter must never send. FailNext injects errors.
 package s3fake
 
@@ -242,7 +243,8 @@ func parseRange(rangeHeader string, size int64) (byteRange, bool) {
 }
 
 func (s *Server) copyObject(writer http.ResponseWriter, request *http.Request, bucket, key string) {
-	source, err := url.PathUnescape(strings.TrimPrefix(request.Header.Get("X-Amz-Copy-Source"), "/"))
+	// S3 decodes the header as a form value, where '+' is a space.
+	source, err := url.QueryUnescape(strings.TrimPrefix(request.Header.Get("X-Amz-Copy-Source"), "/"))
 	sourceBucket, sourceKey, _ := strings.Cut(source, "/")
 	sourceObjects, found := s.buckets[sourceBucket]
 	if err != nil || !found {
@@ -252,6 +254,10 @@ func (s *Server) copyObject(writer http.ResponseWriter, request *http.Request, b
 	stored, found := sourceObjects[sourceKey]
 	if !found {
 		writeError(writer, http.StatusNotFound, "NoSuchKey", "the source key does not exist")
+		return
+	}
+	if match := request.Header.Get("X-Amz-Copy-Source-If-Match"); match != "" && match != stored.etag {
+		writeError(writer, http.StatusPreconditionFailed, "PreconditionFailed", "the source does not match x-amz-copy-source-if-match")
 		return
 	}
 	if sourceBucket == bucket && sourceKey == key && request.Header.Get("X-Amz-Metadata-Directive") != "REPLACE" {

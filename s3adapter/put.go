@@ -97,7 +97,11 @@ func (u *multipartUpload) uploadParts(ctx context.Context, first []byte, reader 
 	}
 	buffer := first[:u.store.partSize]
 	for {
-		count, readError := io.ReadFull(reader, buffer)
+		count, readError := fill(reader, buffer)
+		end := errors.Is(readError, io.EOF)
+		if readError != nil && !end {
+			return 0, fmt.Errorf("read the body: %w", readError)
+		}
 		if count > 0 {
 			if len(u.parts) == maximumParts {
 				return 0, fmt.Errorf("the body needs more than %d parts of %d bytes: %w", maximumParts, u.store.partSize, storage.ErrTooLarge)
@@ -107,13 +111,25 @@ func (u *multipartUpload) uploadParts(ctx context.Context, first []byte, reader 
 			}
 			size += int64(count)
 		}
-		if errors.Is(readError, io.EOF) || errors.Is(readError, io.ErrUnexpectedEOF) {
+		if end {
 			return size, nil
 		}
-		if readError != nil {
-			return 0, fmt.Errorf("read the body: %w", readError)
+	}
+}
+
+// fill reads into buffer until it is full or reader fails, and returns io.EOF only at the end
+// of the body. Not io.ReadFull: it reports a body that ends within the buffer as
+// io.ErrUnexpectedEOF, the error a truncated HTTP body returns too.
+func fill(reader io.Reader, buffer []byte) (int, error) {
+	filled := 0
+	for filled < len(buffer) {
+		count, err := reader.Read(buffer[filled:])
+		filled += count
+		if err != nil {
+			return filled, err
 		}
 	}
+	return filled, nil
 }
 
 func (u *multipartUpload) uploadPart(ctx context.Context, content []byte) error {

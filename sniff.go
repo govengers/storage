@@ -2,7 +2,6 @@ package storage
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,12 +25,12 @@ const sniffLength = 512
 // application/octet-stream. Never trust the client's Content-Type for an upload served back
 // inline.
 func DetectContentType(body io.Reader, allowed []string) (string, io.Reader, error) {
-	head := make([]byte, sniffLength)
-	count, err := io.ReadFull(body, head)
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+	// Not io.ReadFull: it reports a short body as io.ErrUnexpectedEOF, the error a truncated
+	// HTTP body returns too.
+	head, err := io.ReadAll(io.LimitReader(body, sniffLength))
+	if err != nil {
 		return "", nil, fmt.Errorf("read the start of the content: %w", err)
 	}
-	head = head[:count]
 	contentType := http.DetectContentType(head)
 	if !contentTypeAllowed(contentType, allowed) {
 		return "", nil, fmt.Errorf("detected %q, allowed %v: %w", contentType, allowed, ErrUnsupportedContentType)

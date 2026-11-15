@@ -54,3 +54,9 @@ func TestDetectContentTypeReadError(t *testing.T) {
 	_, _, err := storage.DetectContentType(io.MultiReader(strings.NewReader("abc"), iotest.ErrReader(errFailed)), nil)
 	require.ErrorIs(t, err, errFailed)
 }
+
+func TestDetectContentTypeTruncatedBody(t *testing.T) {
+	truncated := io.MultiReader(bytes.NewReader(pngHeader), iotest.ErrReader(io.ErrUnexpectedEOF))
+	_, _, err := storage.DetectContentType(truncated, nil)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF, "a body cut short is no short body")
+}

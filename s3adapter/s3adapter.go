@@ -38,7 +38,10 @@ const (
 	// maximumCopySize is the largest object one CopyObject request copies; Copy reports
 	// ErrNotSupported above it, and storage.Copy streams the object instead.
 	maximumCopySize = 5 << 30
-	defaultRegion   = "us-east-1"
+	// copyAttempts bounds the HeadObject and CopyObject pairs of a Copy whose source is replaced
+	// between the two.
+	copyAttempts  = 3
+	defaultRegion = "us-east-1"
 	// abortTimeout bounds the AbortMultipartUpload after a failed upload, which runs even when
 	// the caller's context is done.
 	abortTimeout = 30 * time.Second
@@ -204,11 +207,21 @@ func (s *Store) Stat(ctx context.Context, key string) (*storage.Object, error) {
 	if err := storage.ValidateKey(key); err != nil {
 		return nil, err
 	}
+	object, _, err := s.head(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("stat %q: %w", key, err)
+	}
+	return object, nil
+}
+
+// head reads the object's attributes and its ETag, which names the revision, with a
+// HeadObject request.
+func (s *Store) head(ctx context.Context, key string) (*storage.Object, *string, error) {
 	output, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)})
 	if err != nil {
-		return nil, fmt.Errorf("stat %q: %w", key, mapError(ctx, err))
+		return nil, nil, mapError(ctx, err)
 	}
-	return toObject(key, aws.ToInt64(output.ContentLength), output.ContentType, output.Metadata, output.LastModified), nil
+	return toObject(key, aws.ToInt64(output.ContentLength), output.ContentType, output.Metadata, output.LastModified), output.ETag, nil
 }
 
 // Delete removes the object with a DeleteObject request, which S3 answers alike for a missing
