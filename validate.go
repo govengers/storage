@@ -5,6 +5,7 @@ import (
 	"maps"
 	"mime"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -214,4 +215,72 @@ func ResolveListOptions(options *ListOptions) (ListOptions, error) {
 		resolved.Limit = MaximumListLimit
 	}
 	return resolved, nil
+}
+
+// ResolvePresignGetOptions validates options and applies the default expiry, for Presigner
+// implementations; a nil options means the defaults.
+func ResolvePresignGetOptions(options *PresignGetOptions) (PresignGetOptions, error) {
+	var resolved PresignGetOptions
+	if options != nil {
+		resolved = *options
+	}
+	expiry, err := resolveExpiry(resolved.Expiry)
+	if err != nil {
+		return PresignGetOptions{}, err
+	}
+	resolved.Expiry = expiry
+	if resolved.ContentType != "" {
+		if err := ValidateContentType(resolved.ContentType); err != nil {
+			return PresignGetOptions{}, err
+		}
+	}
+	if resolved.ContentDisposition != "" {
+		if err := validateContentDisposition(resolved.ContentDisposition); err != nil {
+			return PresignGetOptions{}, err
+		}
+	}
+	return resolved, nil
+}
+
+// ResolvePresignPutOptions validates options and applies the defaults, for Presigner
+// implementations; a nil options means the defaults.
+func ResolvePresignPutOptions(options *PresignPutOptions) (PresignPutOptions, error) {
+	var resolved PresignPutOptions
+	if options != nil {
+		resolved = *options
+	}
+	expiry, err := resolveExpiry(resolved.Expiry)
+	if err != nil {
+		return PresignPutOptions{}, err
+	}
+	resolved.Expiry = expiry
+	if resolved.ContentType == "" {
+		resolved.ContentType = DefaultContentType
+	}
+	if err := ValidateContentType(resolved.ContentType); err != nil {
+		return PresignPutOptions{}, err
+	}
+	return resolved, nil
+}
+
+func resolveExpiry(expiry time.Duration) (time.Duration, error) {
+	if expiry < 0 || expiry > MaximumPresignExpiry {
+		return 0, fmt.Errorf("presign expiry %v, want up to %v: %w", expiry, MaximumPresignExpiry, ErrInvalid)
+	}
+	if expiry == 0 {
+		return DefaultPresignExpiry, nil
+	}
+	return expiry, nil
+}
+
+// validateContentDisposition accepts what mime.ParseMediaType parses ("attachment;
+// filename=\"report.pdf\""), in printable ASCII: the value becomes a response header.
+func validateContentDisposition(disposition string) error {
+	if len(disposition) > MaximumContentTypeLength || !printableASCII(disposition) {
+		return fmt.Errorf("content disposition %q: %w", disposition, ErrInvalid)
+	}
+	if _, _, err := mime.ParseMediaType(disposition); err != nil {
+		return fmt.Errorf("content disposition %q: %v: %w", disposition, err, ErrInvalid)
+	}
+	return nil
 }
