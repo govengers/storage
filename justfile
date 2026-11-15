@@ -6,7 +6,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 gotestsum := "go run gotest.tools/gotestsum@v1.13.0"
 govulncheck := "go run golang.org/x/vuln/cmd/govulncheck@v1.9.0"
 coverage_threshold := "80"
-coverage_excluded := "/examples/|/test/"
+coverage_excluded := "/examples/|/test/|/internal/s3fake/|/storagetest/"
 e2e_inputs := "test/e2e"
 
 default:

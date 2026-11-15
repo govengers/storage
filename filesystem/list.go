@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"path"
 	"slices"
 	"strings"
@@ -79,23 +78,24 @@ func (l *lister) walk(ctx context.Context, directory, namePrefix string) error {
 		if !strings.HasPrefix(entry.name, namePrefix) {
 			continue
 		}
-		key := path.Join(directory, entry.name)
-		if entry.directory {
-			if l.subtreeSkipped(key + "/") {
-				continue
-			}
-			if err := l.walk(ctx, key, ""); err != nil {
-				return err
-			}
-			continue
-		}
-		if key > l.startAfter {
-			if err := l.appendObject(key); err != nil {
-				return err
-			}
+		if err := l.visit(ctx, path.Join(directory, entry.name), entry.directory); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// visit descends into a directory unless all its keys lie before the page, or appends a file's
+// object if it lies after startAfter.
+func (l *lister) visit(ctx context.Context, key string, directory bool) error {
+	switch {
+	case directory && !l.subtreeSkipped(key+"/"):
+		return l.walk(ctx, key, "")
+	case !directory && key > l.startAfter:
+		return l.appendObject(key)
+	default:
+		return nil
+	}
 }
 
 // subtreeSkipped reports whether every key below subtreePrefix sorts before or at startAfter.
@@ -133,14 +133,11 @@ func (l *lister) readDirectory(directory string) ([]listEntry, error) {
 // appendObject adds the object's key, size and modification time; one deleted since the
 // directory was read is left out.
 func (l *lister) appendObject(key string) error {
-	file, object, _, err := l.store.open(key)
-	if errors.Is(err, storage.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+	object, err := l.store.stat(key)
+	if errors.Is(err, storage.ErrNotFound) {
 		return nil
 	}
 	if err != nil {
-		return err
-	}
-	if err := file.Close(); err != nil {
 		return err
 	}
 	l.objects = append(l.objects, storage.Object{Key: key, Size: object.Size, ModifiedAt: object.ModifiedAt})

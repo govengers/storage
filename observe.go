@@ -42,6 +42,41 @@ type Outcome struct {
 	Duration time.Duration
 }
 
+// ErrorClass is the kind of an operation's outcome: a closed set for metric labels and span
+// statuses, which must not carry error messages (they name keys).
+type ErrorClass string
+
+// The classes ClassifyError returns.
+const (
+	ErrorClassSuccess     ErrorClass = "success"
+	ErrorClassNotFound    ErrorClass = "not_found"
+	ErrorClassInvalid     ErrorClass = "invalid" // ErrInvalid, ErrInvalidRange, ErrUnsupportedContentType
+	ErrorClassTooLarge    ErrorClass = "too_large"
+	ErrorClassUnsupported ErrorClass = "unsupported" // ErrNotSupported
+	ErrorClassCancelled   ErrorClass = "cancelled"   // context.Canceled, context.DeadlineExceeded
+	ErrorClassError       ErrorClass = "error"       // everything else: the backend failed
+)
+
+// ClassifyError returns the class of an operation's error; nil is ErrorClassSuccess.
+func ClassifyError(err error) ErrorClass {
+	switch {
+	case err == nil:
+		return ErrorClassSuccess
+	case errors.Is(err, ErrNotFound):
+		return ErrorClassNotFound
+	case errors.Is(err, ErrInvalid), errors.Is(err, ErrInvalidRange), errors.Is(err, ErrUnsupportedContentType):
+		return ErrorClassInvalid
+	case errors.Is(err, ErrTooLarge):
+		return ErrorClassTooLarge
+	case errors.Is(err, ErrNotSupported):
+		return ErrorClassUnsupported
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return ErrorClassCancelled
+	default:
+		return ErrorClassError
+	}
+}
+
 // Observer is told about every operation of an ObservedStore, for metrics, traces or logs;
 // prometheusadapter and oteladapter implement it. OperationStarted returns the context the
 // operation runs in, so a tracing observer can put its span there for the backend's own
@@ -184,7 +219,7 @@ func (s *ObservedStore) start(ctx context.Context, name OperationName) *observed
 	operation := &Operation{Store: s.name, Name: name}
 	start := time.Now()
 	for _, observer := range s.observers {
-		ctx = observer.OperationStarted(ctx, operation)
+		ctx = observer.OperationStarted(ctx, operation) //nolint:fatcontext // each observer wraps the context of the one before, once per call
 	}
 	return &observedCall{store: s, operation: operation, ctx: ctx, start: start}
 }

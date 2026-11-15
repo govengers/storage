@@ -464,17 +464,25 @@ func presigner(t *testing.T, store storage.Store) storage.Presigner {
 	return presigner
 }
 
-func send(t *testing.T, presigned *storage.PresignedRequest, body io.Reader) *http.Response {
+// response is an answer to a presigned request, read completely.
+type response struct {
+	status int
+	header http.Header
+	body   []byte
+}
+
+func send(t *testing.T, presigned *storage.PresignedRequest, body io.Reader) *response {
 	t.Helper()
 	request, err := http.NewRequestWithContext(t.Context(), presigned.Method, presigned.URL, body)
 	require.NoError(t, err)
 	for name, values := range presigned.Header {
 		request.Header[name] = values
 	}
-	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+	answer, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = response.Body.Close() }) // read-only, the close error carries nothing
-	return response
+	content, err := io.ReadAll(answer.Body)
+	require.NoError(t, errors.Join(err, answer.Body.Close()))
+	return &response{status: answer.StatusCode, header: answer.Header, body: content}
 }
 
 func testPresignGet(t *testing.T, store storage.Store) {
@@ -488,13 +496,11 @@ func testPresignGet(t *testing.T, store storage.Store) {
 	require.Equal(t, http.MethodGet, presigned.Method)
 	require.WithinDuration(t, time.Now().Add(time.Minute), presigned.ExpiresAt, 10*time.Second)
 
-	response := send(t, presigned, nil)
-	require.Equal(t, http.StatusOK, response.StatusCode)
-	content, err := io.ReadAll(response.Body)
-	require.NoError(t, err)
-	require.Equal(t, "%PDF-1.7 content", string(content))
-	require.Equal(t, `attachment; filename="report.pdf"`, response.Header.Get("Content-Disposition"))
-	require.Equal(t, "application/pdf", response.Header.Get("Content-Type"))
+	answer := send(t, presigned, nil)
+	require.Equal(t, http.StatusOK, answer.status)
+	require.Equal(t, "%PDF-1.7 content", string(answer.body))
+	require.Equal(t, `attachment; filename="report.pdf"`, answer.header.Get("Content-Disposition"))
+	require.Equal(t, "application/pdf", answer.header.Get("Content-Type"))
 }
 
 func testPresignPut(t *testing.T, store storage.Store) {
@@ -505,8 +511,8 @@ func testPresignPut(t *testing.T, store storage.Store) {
 	require.Equal(t, "image/png", presigned.Header.Get("Content-Type"), "the signed content type is a header to send")
 	require.WithinDuration(t, time.Now().Add(storage.DefaultPresignExpiry), presigned.ExpiresAt, 10*time.Second)
 
-	response := send(t, presigned, bytes.NewReader([]byte("\x89PNG\r\n\x1a\n")))
-	require.Equal(t, http.StatusOK, response.StatusCode)
+	answer := send(t, presigned, bytes.NewReader([]byte("\x89PNG\r\n\x1a\n")))
+	require.Equal(t, http.StatusOK, answer.status, string(answer.body))
 	stat, err := store.Stat(t.Context(), "uploads/photo.png")
 	require.NoError(t, err)
 	require.Equal(t, "image/png", stat.ContentType)

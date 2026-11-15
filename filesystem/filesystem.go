@@ -190,19 +190,19 @@ func (s *Store) Get(_ context.Context, key string, options *storage.GetOptions) 
 	if err != nil {
 		return nil, fmt.Errorf("get %q: %w", key, err)
 	}
-	file, object, contentStart, err := s.open(key)
+	opened, err := s.open(key)
 	if err != nil {
 		return nil, fmt.Errorf("get %q: %w", key, err)
 	}
-	offset, length, err := resolved.Range(object.Size)
+	offset, length, err := resolved.Range(opened.object.Size)
 	if err == nil {
-		_, err = file.Seek(contentStart+offset, io.SeekStart)
+		_, err = opened.file.Seek(opened.contentStart+offset, io.SeekStart)
 	}
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("get %q: %w", key, err), file.Close())
+		return nil, errors.Join(fmt.Errorf("get %q: %w", key, err), opened.file.Close())
 	}
-	body := &rangeBody{Reader: io.LimitReader(file, length), Closer: file}
-	return storage.NewReader(object, offset, length, body), nil
+	body := &rangeBody{Reader: io.LimitReader(opened.file, length), Closer: opened.file}
+	return storage.NewReader(opened.object, offset, length, body), nil
 }
 
 type rangeBody struct {
@@ -215,28 +215,41 @@ func (s *Store) Stat(_ context.Context, key string) (*storage.Object, error) {
 	if err := storage.ValidateKey(key); err != nil {
 		return nil, err
 	}
-	file, object, _, err := s.open(key)
+	object, err := s.stat(key)
 	if err != nil {
-		return nil, fmt.Errorf("stat %q: %w", key, err)
-	}
-	if err := file.Close(); err != nil {
 		return nil, fmt.Errorf("stat %q: %w", key, err)
 	}
 	return object, nil
 }
 
-// open opens the object's file and reads its header; the caller closes the file. It returns
-// the offset of the content in the file.
-func (s *Store) open(key string) (file *os.File, object *storage.Object, contentStart int64, err error) {
-	file, err = s.root.Open(objectPath(key))
+func (s *Store) stat(key string) (*storage.Object, error) {
+	opened, err := s.open(key)
 	if err != nil {
-		return nil, nil, 0, notFound(err)
+		return nil, err
 	}
-	object, contentStart, err = readObject(file, key)
+	if err := opened.file.Close(); err != nil {
+		return nil, err
+	}
+	return opened.object, nil
+}
+
+// openObject is an object's file, read up to the start of the content; the caller closes it.
+type openObject struct {
+	file         *os.File
+	object       *storage.Object
+	contentStart int64 // the offset of the content in the file
+}
+
+func (s *Store) open(key string) (*openObject, error) {
+	file, err := s.root.Open(objectPath(key))
 	if err != nil {
-		return nil, nil, 0, errors.Join(err, file.Close())
+		return nil, notFound(err)
 	}
-	return file, object, contentStart, nil
+	object, contentStart, err := readObject(file, key)
+	if err != nil {
+		return nil, errors.Join(err, file.Close())
+	}
+	return &openObject{file: file, object: object, contentStart: contentStart}, nil
 }
 
 func readObject(file *os.File, key string) (*storage.Object, int64, error) {

@@ -134,13 +134,17 @@ func printableASCII(text string) bool {
 
 // ValidateContentType reports whether contentType may be stored with an object, wrapping
 // ErrInvalid when not: printable ASCII of at most MaximumContentTypeLength bytes that
-// mime.ParseMediaType accepts.
+// mime.ParseMediaType accepts as a type/subtype with optional parameters.
 func ValidateContentType(contentType string) error {
 	if len(contentType) > MaximumContentTypeLength || !printableASCII(contentType) {
 		return fmt.Errorf("content type %q: %w", contentType, ErrInvalid)
 	}
-	if _, _, err := mime.ParseMediaType(contentType); err != nil {
-		return fmt.Errorf("content type %q: %v: %w", contentType, err, ErrInvalid)
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return fmt.Errorf("content type %q: %v: %w", contentType, err, ErrInvalid) //nolint:errorlint // the parser's message is detail, ErrInvalid is the condition
+	}
+	if mainType, subtype, found := strings.Cut(mediaType, "/"); !found || mainType == "" || subtype == "" {
+		return fmt.Errorf("content type %q is no type/subtype: %w", contentType, ErrInvalid)
 	}
 	return nil
 }
@@ -280,7 +284,7 @@ func validateContentDisposition(disposition string) error {
 		return fmt.Errorf("content disposition %q: %w", disposition, ErrInvalid)
 	}
 	if _, _, err := mime.ParseMediaType(disposition); err != nil {
-		return fmt.Errorf("content disposition %q: %v: %w", disposition, err, ErrInvalid)
+		return fmt.Errorf("content disposition %q: %v: %w", disposition, err, ErrInvalid) //nolint:errorlint // the parser's message is detail, ErrInvalid is the condition
 	}
 	return nil
 }

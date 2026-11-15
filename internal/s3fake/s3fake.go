@@ -182,7 +182,8 @@ func (s *Server) getObject(writer http.ResponseWriter, request *http.Request, ob
 	if request.Method == http.MethodGet && s.failed(writer, OperationGetObject) {
 		return
 	}
-	start, end, partial, ok := parseRange(request.Header.Get("Range"), int64(len(stored.content)))
+	selected, ok := parseRange(request.Header.Get("Range"), int64(len(stored.content)))
+	start, end := selected.start, selected.end
 	if !ok {
 		writeError(writer, http.StatusRequestedRangeNotSatisfiable, "InvalidRange", "the range is not satisfiable")
 		return
@@ -203,7 +204,7 @@ func (s *Server) getObject(writer http.ResponseWriter, request *http.Request, ob
 	}
 	header.Set("Content-Length", strconv.FormatInt(end-start, 10))
 	status := http.StatusOK
-	if partial {
+	if selected.partial {
 		header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end-1, len(stored.content)))
 		status = http.StatusPartialContent
 	}
@@ -213,25 +214,31 @@ func (s *Server) getObject(writer http.ResponseWriter, request *http.Request, ob
 	}
 }
 
-// parseRange reads "bytes=start-" or "bytes=start-end" and returns the half-open range.
-func parseRange(rangeHeader string, size int64) (start, end int64, partial, ok bool) {
+// byteRange is the half-open range [start, end) of a GET; partial when the request named one.
+type byteRange struct {
+	start, end int64
+	partial    bool
+}
+
+// parseRange reads "bytes=start-" or "bytes=start-end"; false means unsatisfiable.
+func parseRange(rangeHeader string, size int64) (byteRange, bool) {
 	if rangeHeader == "" {
-		return 0, size, false, true
+		return byteRange{end: size}, true
 	}
 	first, last, found := strings.Cut(strings.TrimPrefix(rangeHeader, "bytes="), "-")
 	start, err := strconv.ParseInt(first, 10, 64)
 	if !found || err != nil || start >= size {
-		return 0, 0, false, false
+		return byteRange{}, false
 	}
-	end = size
+	selected := byteRange{start: start, end: size, partial: true}
 	if last != "" {
 		inclusiveEnd, err := strconv.ParseInt(last, 10, 64)
 		if err != nil || inclusiveEnd < start {
-			return 0, 0, false, false
+			return byteRange{}, false
 		}
-		end = min(inclusiveEnd+1, size)
+		selected.end = min(inclusiveEnd+1, size)
 	}
-	return start, end, true, true
+	return selected, true
 }
 
 func (s *Server) copyObject(writer http.ResponseWriter, request *http.Request, bucket, key string) {

@@ -16,7 +16,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -155,11 +154,11 @@ func (s *Store) Get(ctx context.Context, key string, options *storage.GetOptions
 	if err != nil {
 		return nil, fmt.Errorf("get %q: %w", key, mapError(ctx, err))
 	}
-	object, offset, length, err := readerAttributes(key, output)
+	reader, err := newReader(key, output)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("get %q: %w", key, err), output.Body.Close())
 	}
-	return storage.NewReader(object, offset, length, output.Body), nil
+	return reader, nil
 }
 
 // rangeHeader is the HTTP Range of a Get; nil reads the whole object.
@@ -174,19 +173,19 @@ func rangeHeader(options storage.GetOptions) *string {
 	}
 }
 
-// readerAttributes reads the object and the range a GetObject response holds; a ranged
-// response names the object's size in its Content-Range ("bytes 2-4/10").
-func readerAttributes(key string, output *s3.GetObjectOutput) (object *storage.Object, offset, length int64, err error) {
-	length = aws.ToInt64(output.ContentLength)
-	object = toObject(key, length, output.ContentType, output.Metadata, output.LastModified)
+// newReader reads the object and the range from a GetObject response; a ranged response names
+// the object's size in its Content-Range ("bytes 2-4/10").
+func newReader(key string, output *s3.GetObjectOutput) (*storage.Reader, error) {
+	length := aws.ToInt64(output.ContentLength)
+	object := toObject(key, length, output.ContentType, output.Metadata, output.LastModified)
 	if output.ContentRange == nil {
-		return object, 0, length, nil
+		return storage.NewReader(object, 0, length, output.Body), nil
 	}
-	var last int64
+	var offset, last int64
 	if _, err := fmt.Sscanf(*output.ContentRange, "bytes %d-%d/%d", &offset, &last, &object.Size); err != nil {
-		return nil, 0, 0, fmt.Errorf("parse the Content-Range %q: %w", *output.ContentRange, err)
+		return nil, fmt.Errorf("parse the Content-Range %q: %w", *output.ContentRange, err)
 	}
-	return object, offset, last - offset + 1, nil
+	return storage.NewReader(object, offset, last-offset+1, output.Body), nil
 }
 
 func toObject(key string, size int64, contentType *string, metadata map[string]string, modifiedAt *time.Time) *storage.Object {
@@ -273,9 +272,4 @@ func mapError(ctx context.Context, err error) error {
 		return storage.ErrInvalidRange
 	}
 	return fmt.Errorf("s3: %v", err) //nolint:errorlint // LIB-010: the SDK's errors stay out of the API
-}
-
-// closeBody closes a body the adapter does not hand out; its close error carries nothing.
-func closeBody(body io.Closer) {
-	_ = body.Close()
 }
