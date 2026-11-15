@@ -103,11 +103,12 @@ func (l *lister) subtreeSkipped(subtreePrefix string) bool {
 	return l.startAfter > subtreePrefix && !strings.HasPrefix(l.startAfter, subtreePrefix)
 }
 
-// readDirectory returns the entries of a directory in key order; a missing directory, or a
-// file where the prefix expects one, has none. Entries other than files and directories are
-// left out.
+// readDirectory returns the entries of a directory in key order, named by key segment; a
+// missing directory, or a file where the prefix expects one, has none. Entries other than
+// directories and files with the store's suffixes and a valid segment as name are left out:
+// symlinks, a .DS_Store, files a person put there.
 func (l *lister) readDirectory(directory string) ([]listEntry, error) {
-	handle, err := l.store.root.Open(path.Join(objectsDirectory, directory))
+	handle, err := l.store.root.Open(directoryPath(directory))
 	if err != nil {
 		return nil, ignoreNotExist(notFound(err))
 	}
@@ -118,13 +119,20 @@ func (l *lister) readDirectory(directory string) ([]listEntry, error) {
 	}
 	entries := make([]listEntry, 0, len(dirEntries))
 	for _, dirEntry := range dirEntries {
-		switch {
-		case dirEntry.IsDir():
-			entries = append(entries, listEntry{name: dirEntry.Name(), directory: true, sortKey: dirEntry.Name() + "/"})
-		case dirEntry.Type().IsRegular():
-			entries = append(entries, listEntry{name: dirEntry.Name(), sortKey: dirEntry.Name()})
-		default:
+		isDirectory := dirEntry.IsDir()
+		suffix := objectSuffix
+		if isDirectory {
+			suffix = directorySuffix
 		}
+		name, found := strings.CutSuffix(dirEntry.Name(), suffix)
+		if !found || (!isDirectory && !dirEntry.Type().IsRegular()) || storage.ValidateKey(name) != nil {
+			continue
+		}
+		sortKey := name
+		if isDirectory {
+			sortKey += "/"
+		}
+		entries = append(entries, listEntry{name: name, directory: isDirectory, sortKey: sortKey})
 	}
 	slices.SortFunc(entries, func(left, right listEntry) int { return cmp.Compare(left.sortKey, right.sortKey) })
 	return entries, nil
@@ -138,7 +146,7 @@ func (l *lister) appendObject(key string) error {
 		return nil
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("object %q: %w", key, err)
 	}
 	l.objects = append(l.objects, storage.Object{Key: key, Size: object.Size, ModifiedAt: object.ModifiedAt})
 	return nil

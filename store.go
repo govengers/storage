@@ -13,9 +13,11 @@ import (
 type Store interface {
 	// Put stores body under key, replacing an object stored there. It reads body to the end
 	// and does not close it. The object becomes visible only once body was read completely and
-	// stored: a failed or cancelled Put, or one whose body is larger than
-	// PutOptions.MaximumSize (ErrTooLarge), leaves the previous object, or none, in place. The
-	// result's ModifiedAt is zero on stores that do not report it on write (S3); call Stat
+	// stored, and only if ctx is not done by then: a failed or cancelled body, or one larger
+	// than PutOptions.MaximumSize (ErrTooLarge), leaves the previous object, or none, in place.
+	// An error after the backend committed the write (a lost S3 response, a failed flush of a
+	// directory) can leave the new object in place; readers see one of the two, never a mix.
+	// The result's ModifiedAt is zero on stores that do not report it on write (S3); call Stat
 	// for it. A nil options means the defaults.
 	Put(ctx context.Context, key string, body io.Reader, options *PutOptions) (*Object, error)
 	// Get opens the object stored under key, or the byte range GetOptions selects. It returns

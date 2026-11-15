@@ -1,16 +1,17 @@
 // Package filesystem is a storage.Store in a directory of a local or mounted disk.
 //
-// Every object is one file below <Root>/objects, at the path of its key, holding a small header
-// (content type and metadata) in front of the content; the files are no plain copies of the
-// content. A Put writes to <Root>/tmp, flushes the file to disk and renames it into place, so
-// readers see the old or the new object, never a partial one. All file access goes through an
+// Every object is one file below <Root>/objects, holding a small header (content type and
+// metadata) in front of the content; the files are no plain copies of the content. Every
+// segment of a key but the last is a directory named <segment>.d, the last a file named
+// <segment>.o: "tasks/42" is tasks.d/42.o and "tasks/42/a" is tasks.d/42.d/a.o, so a key can
+// be an object and a prefix of other keys at once, and other files in the tree are ignored.
+// A Put writes to <Root>/tmp, flushes the file to disk and renames it into place, so readers
+// see the old or the new object, never a partial one. All file access goes through an
 // os.Root, which confines it to Root even when the directory holds symlinks.
 //
-// Limits: a key cannot name a file and a directory at once, so "a" and "a/b" cannot both be
-// stored (the second Put fails with storage.ErrInvalid); on a case-insensitive filesystem keys
-// that differ only in case are one object; List reads one header per listed object. Several
-// processes may share Root on one host or a POSIX shared volume; files a crashed Put left in
-// <Root>/tmp are not removed automatically.
+// Limits: on a case-insensitive filesystem keys that differ only in case are one object; List
+// reads one header per listed object. Several processes may share Root on one host or a POSIX
+// shared volume; files a crashed Put left in <Root>/tmp are not removed automatically.
 package filesystem
 
 import (
@@ -23,6 +24,7 @@ import (
 	"maps"
 	"os"
 	"path"
+	"strings"
 	"syscall"
 	"time"
 
@@ -34,8 +36,13 @@ const (
 	temporaryDirectory  = "tmp"
 	filePermission      = 0o600
 	directoryPermission = 0o750
-	// publishAttempts bounds the retries of a rename whose directory a concurrent Delete pruned.
-	publishAttempts = 3
+	// The suffixes of the names of directories and object files: a name of one kind is never a
+	// name of the other.
+	directorySuffix = ".d"
+	objectSuffix    = ".o"
+	// publishAttempts bounds the directory creations and renames of a Put whose directory a
+	// concurrent Delete keeps pruning.
+	publishAttempts = 10
 )
 
 // Options configures a Store.
@@ -88,7 +95,11 @@ func (s *Store) Put(ctx context.Context, key string, body io.Reader, options *st
 	if err != nil {
 		return nil, fmt.Errorf("put %q: %w", key, err)
 	}
-	if err := s.publish(temporaryName, objectPath(key)); err != nil {
+	err = ctx.Err() // a body that ended as ctx was cancelled is no completed Put
+	if err == nil {
+		err = s.publish(temporaryName, objectPath(key))
+	}
+	if err != nil {
 		return nil, errors.Join(fmt.Errorf("put %q: %w", key, err), ignoreNotExist(s.root.Remove(temporaryName)))
 	}
 	return &storage.Object{
@@ -148,33 +159,39 @@ func writeContent(ctx context.Context, file *os.File, body io.Reader, options st
 }
 
 // publish renames the temporary file to target, creating its directories, and flushes the
-// directory entry. A concurrent Delete may prune the directory between the two steps, so a
-// missing directory is retried.
+// directory entry. A concurrent Delete may prune a directory between the two steps, which
+// fails either of them depending on the moment and the platform (ENOENT, EEXIST, ENOTDIR,
+// EINVAL on macOS), so the pair is retried on those.
 func (s *Store) publish(temporaryName, target string) error {
 	directory := path.Dir(target)
-	for attempt := 1; ; attempt++ {
-		if err := s.root.MkdirAll(directory, directoryPermission); err != nil {
-			if isPathConflict(err) {
-				return fmt.Errorf("a parent of the key is an object: %w", storage.ErrInvalid)
-			}
-			return fmt.Errorf("create the directory: %w", err)
+	var err error
+	for range publishAttempts {
+		err = s.root.MkdirAll(directory, directoryPermission)
+		if err == nil {
+			err = s.root.Rename(temporaryName, target)
 		}
-		err := s.root.Rename(temporaryName, target)
-		switch {
-		case err == nil:
+		if err == nil {
 			return s.syncDirectory(directory)
-		case errors.Is(err, syscall.EISDIR) || errors.Is(err, fs.ErrExist):
-			return fmt.Errorf("the key is a prefix of other keys: %w", storage.ErrInvalid)
-		case errors.Is(err, fs.ErrNotExist) && attempt < publishAttempts:
-			continue
-		default:
-			return fmt.Errorf("rename into place: %w", err)
+		}
+		if !isPruneRace(err) {
+			break
 		}
 	}
+	return fmt.Errorf("move the object into place: %w", err)
 }
 
+func isPruneRace(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EINVAL)
+}
+
+// syncDirectory flushes the new directory entry. The object is in place already, so an error
+// here is returned with the new object stored. A directory a concurrent Delete pruned took the
+// object with it: that Delete came later, which is no error of the Put.
 func (s *Store) syncDirectory(directory string) error {
 	handle, err := s.root.Open(directory)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("open the directory to flush it: %w", err)
 	}
@@ -258,7 +275,7 @@ func readObject(file *os.File, key string) (*storage.Object, int64, error) {
 		return nil, 0, fmt.Errorf("stat the file: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, 0, storage.ErrNotFound // a directory: the key is a prefix of other keys
+		return nil, 0, storage.ErrNotFound // a directory in place of an object file: none of ours
 	}
 	stored, contentStart, err := readHeader(file)
 	if err != nil {
@@ -280,7 +297,7 @@ func (s *Store) Delete(_ context.Context, key string) error {
 		return ignoreNotExist(notFound(err))
 	}
 	if !info.Mode().IsRegular() {
-		return nil // a directory: no object is stored under the key
+		return nil // a directory in place of an object file: no object is stored under the key
 	}
 	if err := s.root.Remove(target); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("delete %q: %w", key, err)
@@ -290,8 +307,9 @@ func (s *Store) Delete(_ context.Context, key string) error {
 }
 
 // pruneDirectories removes directory and its parents up to the objects directory while they
-// are empty, so List does not walk them and their names are free for objects again. It stops
-// at the first directory that is not empty, the usual case, which is no error.
+// are empty, so List does not walk them. Their names end in directorySuffix, so a Remove can
+// never take an object file that replaced one meanwhile. It stops at the first directory that
+// is not empty, the usual case, which is no error.
 func (s *Store) pruneDirectories(directory string) {
 	for ; directory != objectsDirectory; directory = path.Dir(directory) {
 		if s.root.Remove(directory) != nil {
@@ -300,8 +318,19 @@ func (s *Store) pruneDirectories(directory string) {
 	}
 }
 
+// objectPath is the file of key below the Root: "tasks/42" is objects/tasks.d/42.o.
 func objectPath(key string) string {
-	return objectsDirectory + "/" + key
+	directory, name := splitPrefix(key)
+	return directoryPath(directory) + "/" + name + objectSuffix
+}
+
+// directoryPath is the directory of a key prefix without its trailing slash below the Root:
+// "tasks/42" is objects/tasks.d/42.d, the empty prefix is objects.
+func directoryPath(prefix string) string {
+	if prefix == "" {
+		return objectsDirectory
+	}
+	return objectsDirectory + "/" + strings.ReplaceAll(prefix, "/", directorySuffix+"/") + directorySuffix
 }
 
 // notFound maps the errors of a path that does not lead to a file to storage.ErrNotFound.
@@ -317,8 +346,4 @@ func ignoreNotExist(err error) error {
 		return nil
 	}
 	return err
-}
-
-func isPathConflict(err error) bool {
-	return errors.Is(err, syscall.ENOTDIR) || errors.Is(err, fs.ErrExist)
 }

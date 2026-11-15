@@ -48,6 +48,9 @@ func (s *Store) Put(ctx context.Context, key string, body io.Reader, options *st
 		return nil, fmt.Errorf("put %q: %w", key, err)
 	}
 	content, err := readAll(ctx, body, resolved.MaximumSize)
+	if err == nil {
+		err = ctx.Err() // a body that ended as ctx was cancelled is no completed Put
+	}
 	if err != nil {
 		return nil, fmt.Errorf("put %q: %w", key, err)
 	}

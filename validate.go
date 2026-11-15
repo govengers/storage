@@ -11,10 +11,13 @@ import (
 )
 
 // The limits ValidateKey and ValidateMetadata enforce. They are the strictest of the supported
-// backends, so a key or metadata set that one Store accepts works on every other.
+// backends, so a key or metadata set that one Store accepts works on every other (keys that
+// differ only in case aside, which a case-insensitive filesystem merges).
 const (
-	MaximumKeyLength         = 1024 // bytes; the S3 limit
-	MaximumKeySegmentLength  = 255  // bytes between two slashes; the limit of common filesystems
+	MaximumKeyLength = 1024 // bytes; the S3 limit
+	// MaximumKeySegmentLength is in bytes between two slashes: the 255 of common filesystems
+	// less the two the filesystem store appends to every name.
+	MaximumKeySegmentLength  = 253
 	MaximumMetadataSize      = 2048 // bytes of all metadata keys and values together; the S3 limit
 	MaximumContentTypeLength = 255  // bytes
 )

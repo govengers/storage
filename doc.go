@@ -8,7 +8,8 @@
 // PresignGet and PresignPut, which fall back or report ErrNotSupported.
 //
 // Every Store validates keys and metadata the same way (ValidateKey, ValidateMetadata), so a
-// key that works on one backend works on every other. The helpers LimitReader,
+// key that works on one backend works on every other; only a case-insensitive filesystem
+// merges keys that differ in case. The helpers LimitReader,
 // NewSHA256Reader and DetectContentType handle untrusted uploads: a size cap that fails
 // instead of truncating, a digest computed while streaming, and the content type from the
 // first bytes checked against an allowlist.

@@ -47,6 +47,10 @@ func Run(t *testing.T, newStore NewStore) {
 		"MaximumSize":         testMaximumSize,
 		"FailedBody":          testFailedBody,
 		"CancelledContext":    testCancelledContext,
+		"CancelledAtTheEnd":   testCancelledAtTheEnd,
+		"SpecialKeys":         testSpecialKeys,
+		"ObjectAndPrefix":     testObjectAndPrefix,
+		"PutDuringDelete":     testPutDuringDelete,
 		"List":                testList,
 		"ListPages":           testListPages,
 		"ResultsAreCopies":    testResultsAreCopies,
@@ -280,6 +284,113 @@ func testCancelledContext(t *testing.T, store storage.Store) {
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = store.Stat(t.Context(), "cancelled")
 	require.ErrorIs(t, err, storage.ErrNotFound, "a cancelled put stores nothing")
+}
+
+// cancellingReader cancels the Put's context in the Read that returns the last bytes and
+// io.EOF together, so only a check after the body was read sees the cancellation.
+type cancellingReader struct {
+	content []byte
+	cancel  context.CancelFunc
+}
+
+func (r *cancellingReader) Read(buffer []byte) (int, error) {
+	r.cancel()
+	count := copy(buffer, r.content)
+	r.content = r.content[count:]
+	if len(r.content) == 0 {
+		return count, io.EOF
+	}
+	return count, nil
+}
+
+func testCancelledAtTheEnd(t *testing.T, store storage.Store) {
+	put(t, store, "upload", "previous", nil)
+	ctx, cancel := context.WithCancel(t.Context())
+	_, err := store.Put(ctx, "upload", &cancellingReader{content: []byte("new"), cancel: cancel}, nil)
+	require.ErrorIs(t, err, context.Canceled)
+	_, content := read(t, store, "upload", nil)
+	require.Equal(t, "previous", content, "a put cancelled while its body ended leaves the previous object")
+}
+
+// specialKeys hold every character S3 and URLs treat specially, and a segment of the longest
+// length ValidateKey allows.
+var specialKeys = []string{
+	"special/a+b c.txt",
+	"special/100% ?&=#;,:@$!'()*~.txt",
+	"special/ünïcödé/日本語.txt",
+	"special/" + strings.Repeat("s", storage.MaximumKeySegmentLength),
+}
+
+func testSpecialKeys(t *testing.T, store storage.Store) {
+	put(t, store, "special/a b.txt", "the space twin of a+b", nil)
+	for index, key := range specialKeys {
+		content := fmt.Sprintf("content %d", index)
+		put(t, store, key, content, nil)
+		_, got := read(t, store, key, nil)
+		require.Equal(t, content, got, "get %q", key)
+
+		destination := fmt.Sprintf("copies/%d/%s", index, strings.TrimPrefix(key, "special/"))
+		copied, err := storage.Copy(t.Context(), store, key, destination)
+		require.NoError(t, err, "copy %q", key)
+		require.Equal(t, int64(len(content)), copied.Size)
+		_, got = read(t, store, destination, nil)
+		require.Equal(t, content, got, "the copy of %q holds its content", key)
+	}
+	want := append(slices.Clone(specialKeys), "special/a b.txt")
+	require.ElementsMatch(t, want, listKeys(t, store, "special/"))
+}
+
+func testObjectAndPrefix(t *testing.T, store storage.Store) {
+	put(t, store, "tasks/42", "the task", nil)
+	put(t, store, "tasks/42/attachment", "the attachment", nil)
+	put(t, store, "tasks/42-draft", "the draft", nil)
+	_, content := read(t, store, "tasks/42", nil)
+	require.Equal(t, "the task", content, "a key may be an object and a prefix of other keys")
+	_, content = read(t, store, "tasks/42/attachment", nil)
+	require.Equal(t, "the attachment", content)
+	require.Equal(t, []string{"tasks/42", "tasks/42-draft", "tasks/42/attachment"}, listKeys(t, store, "tasks/"))
+
+	require.NoError(t, store.Delete(t.Context(), "tasks/42"))
+	_, content = read(t, store, "tasks/42/attachment", nil)
+	require.Equal(t, "the attachment", content, "deleting the object leaves the keys below it")
+	require.NoError(t, store.Delete(t.Context(), "tasks/42/attachment"))
+	put(t, store, "tasks/42", "again", nil)
+	require.Equal(t, []string{"tasks/42", "tasks/42-draft"}, listKeys(t, store, "tasks/"))
+}
+
+// testPutDuringDelete puts and deletes keys of one folder concurrently: a store that removes
+// folders a Delete leaves empty must not fail a Put that needs the folder at the same time.
+func testPutDuringDelete(t *testing.T, store storage.Store) {
+	const rounds, deleters = 25, 4
+	done := make(chan struct{})
+	errs := make([]error, deleters+1)
+	var waitGroup sync.WaitGroup
+	for index := range deleters {
+		waitGroup.Go(func() {
+			key := fmt.Sprintf("tasks/42/sibling-%d", index)
+			for errs[index] == nil {
+				select {
+				case <-done:
+					return
+				default:
+					errs[index] = putAndDelete(t.Context(), store, key)
+				}
+			}
+		})
+	}
+	for round := 0; round < rounds && errs[deleters] == nil; round++ {
+		errs[deleters] = putAndDelete(t.Context(), store, fmt.Sprintf("tasks/42/upload-%d", round))
+	}
+	close(done)
+	waitGroup.Wait()
+	require.NoError(t, errors.Join(errs...))
+}
+
+func putAndDelete(ctx context.Context, store storage.Store, key string) error {
+	if _, err := store.Put(ctx, key, strings.NewReader("x"), nil); err != nil {
+		return err
+	}
+	return store.Delete(ctx, key)
 }
 
 // listKeys reads every page of prefix with a small limit, so paging is part of every listing.
