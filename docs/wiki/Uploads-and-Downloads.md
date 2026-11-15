@@ -4,7 +4,7 @@
 
 The application chooses the key; a client never names it. Use IDs, not file names: `tasks/<task id>/<attachment id>`. The original file name belongs on the database row and in the `Content-Disposition` of the download.
 
-`storage.ValidateKey` is the one rule every backend applies: valid UTF-8, 1 to 1024 bytes, segments separated by single slashes, every segment 1 to 255 bytes, not `.` or `..`, no control character, no backslash. Every Store method rejects anything else with `ErrInvalid` before it touches the backend, so a key built from user input can never leave a filesystem root.
+`storage.ValidateKey` is the one rule every backend applies: valid UTF-8, 1 to 1024 bytes, segments separated by single slashes, every segment 1 to 253 bytes (the filesystem store appends two to each name), not `.` or `..`, no control character, no backslash. Every Store method rejects anything else with `ErrInvalid` before it touches the backend, so a key built from user input can never leave a filesystem root.
 
 ## The upload path
 

@@ -82,7 +82,7 @@ link, err := storage.PresignGet(ctx, attachments, key, &storage.PresignGetOption
 
 - A Put is atomic; concurrent puts to one key leave one whole write. There is no compare-and-swap: the last writer wins.
 - `List` returns keys in byte order, at most 1000 per page, with size and modification time only.
-- Keys are case-sensitive; on a case-insensitive filesystem two keys that differ in case are one file. The filesystem store cannot hold `a` and `a/b` at once.
+- Keys are case-sensitive; on a case-insensitive filesystem two keys that differ in case are one file.
 - A presigned PUT cannot cap the size or check the content: check the stored object before the application uses it.
 - `s3adapter` holds one part (8 MiB by default) in memory per running Put and stores up to 10000 parts.
 

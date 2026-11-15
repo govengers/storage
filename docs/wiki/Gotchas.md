@@ -11,6 +11,5 @@
 - **List carries no content type or metadata.** S3 does not list them; Stat the objects you need.
 - **No compare-and-swap.** Concurrent puts to one key: the last one wins. Use a new key per version (an ID) and switch the database row.
 - **Set an abort rule for incomplete multipart uploads on the bucket.** A killed process cannot abort its upload.
-- **The filesystem store cannot hold `a` and `a/b`.** Choose keys whose segments are either objects or folders, like `tasks/<id>/<file id>`.
 - **Keys are case-sensitive, macOS and Windows filesystems are not.** Lowercase generated keys, or use IDs.
 - **Never use a file name as a key segment.** It carries personal data into logs of the backend and into your bucket listing; use an ID.
