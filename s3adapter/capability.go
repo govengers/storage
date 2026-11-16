@@ -13,6 +13,7 @@ import (
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
 	"github.com/govengers/storage"
 )
@@ -20,9 +21,13 @@ import (
 // Copy copies inside the bucket with one CopyObject request, keeping the content type and
 // metadata. It reads the source's attributes first and returns storage.ErrNotSupported for a
 // source above 5 GiB, the limit of one CopyObject; storage.Copy then streams it. The copy is
-// bound to the revision it read with x-amz-copy-source-if-match, so the attributes it returns
-// are those of the copied content; a source replaced in between is read again.
+// bound to the content it read with x-amz-copy-source-if-match (a source replaced in between
+// is read again), and it sets the content type and metadata it read on the copy, because an
+// ETag identifies the bytes only: the returned object describes the stored copy.
 func (s *Store) Copy(ctx context.Context, source, destination string) (*storage.Object, error) {
+	if err := storage.ValidateKey(source); err != nil {
+		return nil, err
+	}
 	if err := storage.ValidateKey(destination); err != nil {
 		return nil, err
 	}
@@ -39,6 +44,7 @@ func (s *Store) Copy(ctx context.Context, source, destination string) (*storage.
 		}
 		output, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
 			Bucket: aws.String(s.bucket), Key: aws.String(destination), CopySource: aws.String(copySource(s.bucket, source)), CopySourceIfMatch: etag,
+			MetadataDirective: types.MetadataDirectiveReplace, ContentType: aws.String(object.ContentType), Metadata: object.Metadata,
 		})
 		if err != nil && isPreconditionFailed(err) && attempt < copyAttempts {
 			continue // the source was replaced after the HeadObject

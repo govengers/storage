@@ -1,7 +1,7 @@
 // Package s3fake is an in-process S3 server for the tests of s3adapter: the path-style REST
 // calls s3adapter makes (put, get with range, head, delete, list v2, copy, multipart upload)
 // on buckets held in memory, with x-amz-copy-source decoded like S3 does ('+' is a space) and
-// x-amz-copy-source-if-match. It does not check signatures or expiry, and refuses
+// x-amz-copy-source-if-match and x-amz-metadata-directive. It does not check signatures or expiry, and refuses
 // aws-chunked bodies, which s3adapter must never send. FailNext injects errors.
 package s3fake
 
@@ -267,7 +267,11 @@ func (s *Server) copyObject(writer http.ResponseWriter, request *http.Request, b
 	if s.failed(writer, OperationCopyObject) {
 		return
 	}
-	copied := s.newObject(stored.content, stored.contentType, maps.Clone(stored.metadata))
+	contentType, metadata := stored.contentType, maps.Clone(stored.metadata)
+	if request.Header.Get("X-Amz-Metadata-Directive") == "REPLACE" {
+		contentType, metadata = request.Header.Get("Content-Type"), metadataOf(request.Header)
+	}
+	copied := s.newObject(stored.content, contentType, metadata)
 	s.buckets[bucket][key] = copied
 	writeXML(writer, http.StatusOK, &copyObjectResult{LastModified: copied.modifiedAt.Format(time.RFC3339), ETag: copied.etag})
 }

@@ -209,25 +209,38 @@ func (b *beforeCopy) RoundTrip(request *http.Request) (*http.Response, error) {
 }
 
 func TestCopyReturnsTheAttributesOfTheCopiedRevision(t *testing.T) {
-	server := s3fake.New(t.Cleanup, bucket)
-	writer := newStore(t, server, 0)
-	_, err := writer.Put(t.Context(), "source", strings.NewReader("1"), &storage.PutOptions{ContentType: "text/plain"})
-	require.NoError(t, err)
-	hook := &beforeCopy{replace: func() {
-		_, err := writer.Put(t.Context(), "source", bytes.NewReader(content(100)), &storage.PutOptions{ContentType: "application/pdf"})
-		require.NoError(t, err)
-	}}
-	store, err := s3adapter.New(&s3adapter.Options{
-		Endpoint: server.URL, Bucket: bucket, AccessKeyID: "access", SecretAccessKey: "secret", PathStyle: true,
-		HTTPClient: &http.Client{Transport: hook},
-	})
-	require.NoError(t, err)
+	replacement := &storage.PutOptions{ContentType: "application/pdf", Metadata: map[string]string{"revision": "2"}}
+	testCases := []struct {
+		name    string
+		content []byte
+	}{
+		{name: "other content", content: content(100)},
+		{name: "same content", content: []byte("1")}, // same ETag, other attributes
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := s3fake.New(t.Cleanup, bucket)
+			writer := newStore(t, server, 0)
+			_, err := writer.Put(t.Context(), "source", strings.NewReader("1"), &storage.PutOptions{ContentType: "text/plain", Metadata: map[string]string{"revision": "1"}})
+			require.NoError(t, err)
+			hook := &beforeCopy{replace: func() {
+				_, err := writer.Put(t.Context(), "source", bytes.NewReader(testCase.content), replacement)
+				require.NoError(t, err)
+			}}
+			store, err := s3adapter.New(&s3adapter.Options{
+				Endpoint: server.URL, Bucket: bucket, AccessKeyID: "access", SecretAccessKey: "secret", PathStyle: true,
+				HTTPClient: &http.Client{Transport: hook},
+			})
+			require.NoError(t, err)
 
-	copied, err := store.Copy(t.Context(), "source", "destination")
-	require.NoError(t, err)
-	stat, err := store.Stat(t.Context(), "destination")
-	require.NoError(t, err)
-	require.Equal(t, int64(100), stat.Size, "the copy holds the replacement")
-	require.Equal(t, stat.Size, copied.Size, "Copy reports the revision it copied")
-	require.Equal(t, stat.ContentType, copied.ContentType)
+			copied, err := store.Copy(t.Context(), "source", "destination")
+			require.NoError(t, err)
+			stat, err := store.Stat(t.Context(), "destination")
+			require.NoError(t, err)
+			require.Equal(t, int64(len(testCase.content)), stat.Size, "the copy holds the replacement's content")
+			require.Equal(t, stat.Size, copied.Size, "Copy reports the object it stored")
+			require.Equal(t, stat.ContentType, copied.ContentType)
+			require.Equal(t, stat.Metadata, copied.Metadata)
+		})
+	}
 }

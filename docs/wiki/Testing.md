@@ -20,7 +20,7 @@ It checks the Store contract, and Copier and Presigner when the store implements
 
 ## The S3 fake
 
-`internal/s3fake` is an in-process S3 on a loopback `httptest` server: put, get with range, head, delete, ListObjectsV2, copy (with `x-amz-copy-source` decoded like S3, `+` as a space, and `x-amz-copy-source-if-match`) and multipart upload on buckets in memory. `FailNext` injects 403 errors (which the SDK does not retry, so no test waits for a backoff), `PendingUploads` proves that failed uploads were aborted. It does not check signatures or expiry, and refuses aws-chunked bodies, which s3adapter must never send. It is internal to this module.
+`internal/s3fake` is an in-process S3 on a loopback `httptest` server: put, get with range, head, delete, ListObjectsV2, copy (with `x-amz-copy-source` decoded like S3, `+` as a space, `x-amz-copy-source-if-match` and `x-amz-metadata-directive`) and multipart upload on buckets in memory. `FailNext` injects 403 errors (which the SDK does not retry, so no test waits for a backoff), `PendingUploads` proves that failed uploads were aborted. It does not check signatures or expiry, and refuses aws-chunked bodies, which s3adapter must never send. It is internal to this module.
 
 ## The suites
 

@@ -560,6 +560,10 @@ func testCopyContract(t *testing.T, copyObject copyFunction, store storage.Store
 	require.ErrorIs(t, err, storage.ErrNotFound)
 	_, err = copyObject(t.Context(), "source.bin", "../escape")
 	require.ErrorIs(t, err, storage.ErrInvalid)
+	for _, source := range []string{"", "../escape", "a//b", "/b", "b/"} {
+		_, err = copyObject(t.Context(), source, "copies/other")
+		require.ErrorIs(t, err, storage.ErrInvalid, "source %q", source)
+	}
 }
 
 func presigner(t *testing.T, store storage.Store) storage.Presigner {
