@@ -1,0 +1,353 @@
+// Package filesystem is a storage.Store in a directory of a local or mounted disk.
+//
+// Every object is one file below <Root>/objects, holding a small header (content type and
+// metadata) in front of the content; the files are no plain copies of the content. Every
+// segment of a key but the last is a directory named <segment>.d, the last a file named
+// <segment>.o: "tasks/42" is tasks.d/42.o and "tasks/42/a" is tasks.d/42.d/a.o, so a key can
+// be an object and a prefix of other keys at once, and other files in the tree are ignored.
+// A Put writes to <Root>/tmp, flushes the file to disk and renames it into place, so readers
+// see the old or the new object, never a partial one. All file access goes through an
+// os.Root, which confines it to Root even when the directory holds symlinks.
+//
+// Limits: on a case-insensitive filesystem keys that differ only in case are one object; List
+// reads one header per listed object. Several processes may share Root on one host or a POSIX
+// shared volume; files a crashed Put left in <Root>/tmp are not removed automatically.
+package filesystem
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"maps"
+	"os"
+	"path"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/govengers/storage"
+)
+
+const (
+	objectsDirectory    = "objects"
+	temporaryDirectory  = "tmp"
+	filePermission      = 0o600
+	directoryPermission = 0o750
+	// The suffixes of the names of directories and object files: a name of one kind is never a
+	// name of the other.
+	directorySuffix = ".d"
+	objectSuffix    = ".o"
+	// publishAttempts bounds the directory creations and renames of a Put whose directory a
+	// concurrent Delete keeps pruning.
+	publishAttempts = 10
+)
+
+// Options configures a Store.
+type Options struct {
+	// Root is an existing directory the Store owns; required. New creates the subdirectories
+	// objects and tmp in it.
+	Root string
+}
+
+// Store is a storage.Store on a filesystem. It is safe for concurrent use. Close releases
+// the directory.
+type Store struct {
+	root *os.Root
+}
+
+var _ storage.Store = (*Store)(nil)
+
+// New opens options.Root and creates its objects and tmp directories.
+func New(options *Options) (*Store, error) {
+	if options == nil || options.Root == "" {
+		return nil, errors.New("filesystem: Options.Root is required")
+	}
+	root, err := os.OpenRoot(options.Root)
+	if err != nil {
+		return nil, fmt.Errorf("filesystem: open the root %s: %w", options.Root, err)
+	}
+	for _, directory := range []string{objectsDirectory, temporaryDirectory} {
+		if err := root.MkdirAll(directory, directoryPermission); err != nil {
+			return nil, errors.Join(fmt.Errorf("filesystem: create %s in %s: %w", directory, options.Root, err), root.Close())
+		}
+	}
+	return &Store{root: root}, nil
+}
+
+// Close releases the root directory; the Store is unusable afterwards.
+func (s *Store) Close() error {
+	return s.root.Close()
+}
+
+// Put writes body to a temporary file, flushes it and renames it to the key's path.
+func (s *Store) Put(ctx context.Context, key string, body io.Reader, options *storage.PutOptions) (*storage.Object, error) {
+	if err := storage.ValidateKey(key); err != nil {
+		return nil, err
+	}
+	resolved, err := storage.ResolvePutOptions(options)
+	if err != nil {
+		return nil, fmt.Errorf("put %q: %w", key, err)
+	}
+	temporaryName, written, err := s.writeTemporary(ctx, body, resolved)
+	if err != nil {
+		return nil, fmt.Errorf("put %q: %w", key, err)
+	}
+	if err := s.publish(ctx, temporaryName, objectPath(key)); err != nil {
+		return nil, errors.Join(fmt.Errorf("put %q: %w", key, err), ignoreNotExist(s.root.Remove(temporaryName)))
+	}
+	return &storage.Object{
+		Key: key, Size: written.size, ContentType: resolved.ContentType, Metadata: maps.Clone(resolved.Metadata), ModifiedAt: written.modifiedAt,
+	}, nil
+}
+
+// written describes a flushed temporary file; the rename keeps its modification time.
+type written struct {
+	size       int64
+	modifiedAt time.Time
+}
+
+// writeTemporary writes the header and body to a new file in the tmp directory, flushed to
+// disk, and returns its name; on failure it removes the file.
+func (s *Store) writeTemporary(ctx context.Context, body io.Reader, options storage.PutOptions) (_ string, _ written, err error) {
+	name := path.Join(temporaryDirectory, rand.Text())
+	file, err := s.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, filePermission)
+	if err != nil {
+		return "", written{}, fmt.Errorf("create a temporary file: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, ignoreNotExist(s.root.Remove(name)))
+		}
+	}()
+	result, err := writeContent(ctx, file, body, options)
+	if err != nil {
+		return "", written{}, errors.Join(err, file.Close())
+	}
+	if err := file.Close(); err != nil {
+		return "", written{}, fmt.Errorf("close the temporary file: %w", err)
+	}
+	return name, result, nil
+}
+
+func writeContent(ctx context.Context, file *os.File, body io.Reader, options storage.PutOptions) (written, error) {
+	if err := writeHeader(file, &header{ContentType: options.ContentType, Metadata: options.Metadata}); err != nil {
+		return written{}, err
+	}
+	reader := storage.ContextReader(ctx, body)
+	if options.MaximumSize > 0 {
+		reader = storage.LimitReader(reader, options.MaximumSize)
+	}
+	size, err := io.Copy(file, reader)
+	if err != nil {
+		return written{}, fmt.Errorf("write the content: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return written{}, fmt.Errorf("flush the content: %w", err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return written{}, fmt.Errorf("stat the temporary file: %w", err)
+	}
+	return written{size: size, modifiedAt: info.ModTime()}, nil
+}
+
+// publish renames the temporary file to target, creating its directories, and flushes the
+// directory entry. A concurrent Delete may prune a directory between the two steps, which
+// fails either of them depending on the moment and the platform (ENOENT, EEXIST, ENOTDIR,
+// EINVAL on macOS), so the pair is retried on those. ctx is checked right before every
+// rename: a body that ended as ctx was cancelled, or a deadline that passed meanwhile, is no
+// completed Put. A failed publish prunes the directories it may have created; a concurrent Put
+// that needs them retries per S19.
+func (s *Store) publish(ctx context.Context, temporaryName, target string) error {
+	directory := path.Dir(target)
+	var err error
+	for range publishAttempts {
+		err = s.root.MkdirAll(directory, directoryPermission)
+		if err == nil {
+			if err := ctx.Err(); err != nil {
+				s.pruneDirectories(directory)
+				return err
+			}
+			err = s.root.Rename(temporaryName, target)
+		}
+		if err == nil {
+			return s.syncDirectory(directory)
+		}
+		if !isPruneRace(err) {
+			break
+		}
+	}
+	s.pruneDirectories(directory)
+	return fmt.Errorf("move the object into place: %w", err)
+}
+
+func isPruneRace(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EINVAL)
+}
+
+// syncDirectory flushes the new directory entry. The object is in place already, so an error
+// here is returned with the new object stored. A directory a concurrent Delete pruned took the
+// object with it: that Delete came later, which is no error of the Put.
+func (s *Store) syncDirectory(directory string) error {
+	handle, err := s.root.Open(directory)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open the directory to flush it: %w", err)
+	}
+	return errors.Join(handle.Sync(), handle.Close())
+}
+
+// Get opens the object's file and positions it at the start of the range.
+func (s *Store) Get(_ context.Context, key string, options *storage.GetOptions) (*storage.Reader, error) {
+	if err := storage.ValidateKey(key); err != nil {
+		return nil, err
+	}
+	resolved, err := storage.ResolveGetOptions(options)
+	if err != nil {
+		return nil, fmt.Errorf("get %q: %w", key, err)
+	}
+	opened, err := s.open(key)
+	if err != nil {
+		return nil, fmt.Errorf("get %q: %w", key, err)
+	}
+	offset, length, err := resolved.Range(opened.object.Size)
+	if err == nil {
+		_, err = opened.file.Seek(opened.contentStart+offset, io.SeekStart)
+	}
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("get %q: %w", key, err), opened.file.Close())
+	}
+	body := &rangeBody{Reader: io.LimitReader(opened.file, length), Closer: opened.file}
+	return storage.NewReader(opened.object, offset, length, body), nil
+}
+
+type rangeBody struct {
+	io.Reader
+	io.Closer
+}
+
+// Stat reads the object's header and file attributes.
+func (s *Store) Stat(_ context.Context, key string) (*storage.Object, error) {
+	if err := storage.ValidateKey(key); err != nil {
+		return nil, err
+	}
+	object, err := s.stat(key)
+	if err != nil {
+		return nil, fmt.Errorf("stat %q: %w", key, err)
+	}
+	return object, nil
+}
+
+func (s *Store) stat(key string) (*storage.Object, error) {
+	opened, err := s.open(key)
+	if err != nil {
+		return nil, err
+	}
+	if err := opened.file.Close(); err != nil {
+		return nil, err
+	}
+	return opened.object, nil
+}
+
+// openObject is an object's file, read up to the start of the content; the caller closes it.
+type openObject struct {
+	file         *os.File
+	object       *storage.Object
+	contentStart int64 // the offset of the content in the file
+}
+
+func (s *Store) open(key string) (*openObject, error) {
+	file, err := s.root.Open(objectPath(key))
+	if err != nil {
+		return nil, notFound(err)
+	}
+	object, contentStart, err := readObject(file, key)
+	if err != nil {
+		return nil, errors.Join(err, file.Close())
+	}
+	return &openObject{file: file, object: object, contentStart: contentStart}, nil
+}
+
+func readObject(file *os.File, key string) (*storage.Object, int64, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return nil, 0, fmt.Errorf("stat the file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, 0, storage.ErrNotFound // a directory in place of an object file: none of ours
+	}
+	stored, contentStart, err := readHeader(file)
+	if err != nil {
+		return nil, 0, err
+	}
+	return &storage.Object{
+		Key: key, Size: info.Size() - contentStart, ContentType: stored.ContentType, Metadata: stored.Metadata, ModifiedAt: info.ModTime(),
+	}, contentStart, nil
+}
+
+// Delete removes the object's file and the directories it leaves empty.
+func (s *Store) Delete(_ context.Context, key string) error {
+	if err := storage.ValidateKey(key); err != nil {
+		return err
+	}
+	target := objectPath(key)
+	info, err := s.root.Lstat(target)
+	if err != nil {
+		return ignoreNotExist(notFound(err))
+	}
+	if !info.Mode().IsRegular() {
+		return nil // a directory in place of an object file: no object is stored under the key
+	}
+	if err := s.root.Remove(target); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("delete %q: %w", key, err)
+	}
+	s.pruneDirectories(path.Dir(target))
+	return nil
+}
+
+// pruneDirectories removes directory and its parents up to the objects directory while they
+// are empty, so List does not walk them. Their names end in directorySuffix, so a Remove can
+// never take an object file that replaced one meanwhile. It stops at the first directory that
+// is not empty, the usual case, which is no error.
+func (s *Store) pruneDirectories(directory string) {
+	for ; directory != objectsDirectory; directory = path.Dir(directory) {
+		if s.root.Remove(directory) != nil {
+			return
+		}
+	}
+}
+
+// objectPath is the file of key below the Root: "tasks/42" is objects/tasks.d/42.o.
+func objectPath(key string) string {
+	directory, name := splitPrefix(key)
+	return directoryPath(directory) + "/" + name + objectSuffix
+}
+
+// directoryPath is the directory of a key prefix without its trailing slash below the Root:
+// "tasks/42" is objects/tasks.d/42.d, the empty prefix is objects.
+func directoryPath(prefix string) string {
+	if prefix == "" {
+		return objectsDirectory
+	}
+	return objectsDirectory + "/" + strings.ReplaceAll(prefix, "/", directorySuffix+"/") + directorySuffix
+}
+
+// notFound maps the errors of a path that does not lead to a file to storage.ErrNotFound.
+func notFound(err error) error {
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+		return storage.ErrNotFound
+	}
+	return err
+}
+
+func ignoreNotExist(err error) error {
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, storage.ErrNotFound) {
+		return nil
+	}
+	return err
+}

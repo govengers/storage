@@ -1,0 +1,20 @@
+# govengers/storage
+
+> Blob storage for govengers services behind one interface: storage.Store (put with content type, metadata and size cap, get with byte range, stat, delete, paged list), backends for S3-compatible object stores (AWS SDK v2, multipart, copy, presigned URLs, path style), the filesystem (os.Root, atomic writes) and memory, helpers for untrusted uploads (key validation, LimitReader, streaming SHA-256, content type sniffing with an allowlist), an ObservedStore with Prometheus and OpenTelemetry adapters, and the conformance suite storagetest.
+
+- Module: `github.com/govengers/storage`, Go 1.26, Apache 2.0.
+- Packages: `storage` (Store, Copier, Presigner, Copy, PresignGet, PresignPut, ValidateKey, ValidatePrefix, ValidateMetadata, ValidateContentType, LimitReader, NewSHA256Reader, DetectContentType, ObservedStore, Observer, ClassifyError), `s3adapter`, `filesystem`, `memory`, `prometheusadapter`, `oteladapter`, `storagetest` (Run).
+- Standards: govengers/standards, `library` profile.
+- Rules of thumb: the application chooses keys, never the client; detect the content type from the bytes, cap the size with PutOptions.MaximumSize, record size, type and digest on the owning database row; use storage.Copy and storage.PresignGet/PresignPut instead of type assertions; a presigned PUT checks nothing, verify the stored object; serve untrusted uploads as attachments.
+
+## Docs
+
+- [README.md](README.md): overview, install, usage, errors, packages, guarantees.
+- [docs/wiki/Home.md](docs/wiki/Home.md): model, package map, which piece for which need, wiring order.
+- [docs/wiki/Uploads-and-Downloads.md](docs/wiki/Uploads-and-Downloads.md): keys, the upload path, ranges, presigned URLs, serving untrusted content.
+- [docs/wiki/S3.md](docs/wiki/S3.md): options, path style, multipart, copy, presigning, compatible servers.
+- [docs/wiki/Filesystem.md](docs/wiki/Filesystem.md): layout, file format, atomicity, limits, volumes.
+- [docs/wiki/Observability.md](docs/wiki/Observability.md): ObservedStore, metrics, spans, error classes.
+- [docs/wiki/Testing.md](docs/wiki/Testing.md): memory store, storagetest, the S3 fake, the end-to-end suite.
+- [docs/wiki/Gotchas.md](docs/wiki/Gotchas.md): the rules that are easy to get wrong.
+- [docs/design.md](docs/design.md): the design, decisions S1 onwards.
