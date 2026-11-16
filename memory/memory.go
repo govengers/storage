@@ -48,9 +48,6 @@ func (s *Store) Put(ctx context.Context, key string, body io.Reader, options *st
 		return nil, fmt.Errorf("put %q: %w", key, err)
 	}
 	content, err := readAll(ctx, body, resolved.MaximumSize)
-	if err == nil {
-		err = ctx.Err() // a body that ended as ctx was cancelled is no completed Put
-	}
 	if err != nil {
 		return nil, fmt.Errorf("put %q: %w", key, err)
 	}
@@ -58,8 +55,13 @@ func (s *Store) Put(ctx context.Context, key string, body io.Reader, options *st
 		Key: key, Size: int64(len(content)), ContentType: resolved.ContentType, Metadata: resolved.Metadata, ModifiedAt: time.Now(),
 	}}
 	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	// Checked under the lock: a body that ended as ctx was cancelled, or a deadline that passed
+	// while waiting for the lock, is no completed Put.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("put %q: %w", key, err)
+	}
 	s.objects[key] = stored
-	s.mutex.Unlock()
 	return cloneObject(&stored.object), nil
 }
 
@@ -154,7 +156,7 @@ func (s *Store) List(_ context.Context, options *storage.ListOptions) (*storage.
 }
 
 // Copy shares the source's content with the copy; stored content is never modified in place.
-func (s *Store) Copy(_ context.Context, source, destination string) (*storage.Object, error) {
+func (s *Store) Copy(ctx context.Context, source, destination string) (*storage.Object, error) {
 	if err := storage.ValidateKey(source); err != nil {
 		return nil, err
 	}
@@ -163,6 +165,9 @@ func (s *Store) Copy(_ context.Context, source, destination string) (*storage.Ob
 	}
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("copy %q to %q: %w", source, destination, err)
+	}
 	stored, found := s.objects[source]
 	if !found {
 		return nil, fmt.Errorf("copy %q to %q: %w", source, destination, storage.ErrNotFound)

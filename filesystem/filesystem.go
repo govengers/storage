@@ -95,11 +95,7 @@ func (s *Store) Put(ctx context.Context, key string, body io.Reader, options *st
 	if err != nil {
 		return nil, fmt.Errorf("put %q: %w", key, err)
 	}
-	err = ctx.Err() // a body that ended as ctx was cancelled is no completed Put
-	if err == nil {
-		err = s.publish(temporaryName, objectPath(key))
-	}
-	if err != nil {
+	if err := s.publish(ctx, temporaryName, objectPath(key)); err != nil {
 		return nil, errors.Join(fmt.Errorf("put %q: %w", key, err), ignoreNotExist(s.root.Remove(temporaryName)))
 	}
 	return &storage.Object{
@@ -161,13 +157,18 @@ func writeContent(ctx context.Context, file *os.File, body io.Reader, options st
 // publish renames the temporary file to target, creating its directories, and flushes the
 // directory entry. A concurrent Delete may prune a directory between the two steps, which
 // fails either of them depending on the moment and the platform (ENOENT, EEXIST, ENOTDIR,
-// EINVAL on macOS), so the pair is retried on those.
-func (s *Store) publish(temporaryName, target string) error {
+// EINVAL on macOS), so the pair is retried on those. ctx is checked right before every
+// rename: a body that ended as ctx was cancelled, or a deadline that passed meanwhile, is no
+// completed Put.
+func (s *Store) publish(ctx context.Context, temporaryName, target string) error {
 	directory := path.Dir(target)
 	var err error
 	for range publishAttempts {
 		err = s.root.MkdirAll(directory, directoryPermission)
 		if err == nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			err = s.root.Rename(temporaryName, target)
 		}
 		if err == nil {
