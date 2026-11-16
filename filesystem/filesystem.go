@@ -159,7 +159,8 @@ func writeContent(ctx context.Context, file *os.File, body io.Reader, options st
 // fails either of them depending on the moment and the platform (ENOENT, EEXIST, ENOTDIR,
 // EINVAL on macOS), so the pair is retried on those. ctx is checked right before every
 // rename: a body that ended as ctx was cancelled, or a deadline that passed meanwhile, is no
-// completed Put.
+// completed Put. A failed publish prunes the directories it may have created; a concurrent Put
+// that needs them retries per S19.
 func (s *Store) publish(ctx context.Context, temporaryName, target string) error {
 	directory := path.Dir(target)
 	var err error
@@ -167,6 +168,7 @@ func (s *Store) publish(ctx context.Context, temporaryName, target string) error
 		err = s.root.MkdirAll(directory, directoryPermission)
 		if err == nil {
 			if err := ctx.Err(); err != nil {
+				s.pruneDirectories(directory)
 				return err
 			}
 			err = s.root.Rename(temporaryName, target)
@@ -178,6 +180,7 @@ func (s *Store) publish(ctx context.Context, temporaryName, target string) error
 			break
 		}
 	}
+	s.pruneDirectories(directory)
 	return fmt.Errorf("move the object into place: %w", err)
 }
 

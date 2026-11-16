@@ -1,6 +1,8 @@
 package filesystem_test
 
 import (
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,6 +69,25 @@ func TestDeletePrunesEmptyDirectories(t *testing.T) {
 	require.NoDirExists(t, filepath.Join(root, "objects", "deep.d", "er.d"))
 	require.FileExists(t, filepath.Join(root, "objects", "deep.d", "sibling.o"))
 	require.DirExists(t, filepath.Join(root, "objects"))
+}
+
+func TestCancelledPutLeavesNoDirectories(t *testing.T) {
+	root := t.TempDir()
+	store := newStore(t, root)
+	ctx, cancel := context.WithCancel(t.Context())
+	_, err := store.Put(ctx, "tasks/42/upload", cancelAtEOF{cancel: cancel}, nil)
+	require.ErrorIs(t, err, context.Canceled)
+	require.NoDirExists(t, filepath.Join(root, "objects", "tasks.d"), "the directories of a cancelled Put are pruned")
+	requireNoTemporaryFiles(t, root)
+}
+
+// cancelAtEOF cancels the Put's context in the Read that ends the body, so the Put fails at
+// its commit point after creating the object's directories.
+type cancelAtEOF struct{ cancel context.CancelFunc }
+
+func (r cancelAtEOF) Read([]byte) (int, error) {
+	r.cancel()
+	return 0, io.EOF
 }
 
 func TestForeignFiles(t *testing.T) {
